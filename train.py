@@ -1,11 +1,13 @@
 import os
 import torch
 import torchvision
-import model
+# import model
+import complex_model as model
 import loss
 from torch.utils.data import DataLoader
 from dataset import YDS, RXDS, XYDS
 import argparse
+import itertools
 
 parser = argparse.ArgumentParser()
 
@@ -14,20 +16,30 @@ parser.add_argument("-y", "--y_root_dir", default="./data/yimg", type=str)
 parser.add_argument("-r", "--r_root_dir", default='./data/rimg', type=str)
 parser.add_argument("-x", "--x_root_dir", default='./data/ximg', type=str)
 parser.add_argument("-s", "--save_dir", default='./checkpoint', type=str)
-parser.add_argument("-b", "--batch_size", default=2, type=int)
+parser.add_argument("-b", "--batch_size", default=8, type=int)
 parser.add_argument("-z", "--z_dim", default=30, type=int)
+
+parser.add_argument("--lr", default=1e-4, type=float)
+parser.add_argument("-v", "--lr_vae", default=1e-6, type=float)
 parser.add_argument("-e", "--lr_encoder", default=1e-6, type=float)
 parser.add_argument("-g", "--lr_generator", default=1e-6, type=float)
 parser.add_argument("-i", "--lr_discimg", default=1e-5, type=float)
 parser.add_argument("-l", "--lr_disclatent", default=3e-6, type=float)
 parser.add_argument("-m", "--lr_mapping", default=1e-7, type=float)
-parser.add_argument("--epoch_y", default=2, type=int)
-parser.add_argument("--epoch_rx", default=2, type=int)
-parser.add_argument("--epoch_xy", default=2, type=int)
 
-parser.add_argument("--alpha", default=10, type=float)
-parser.add_argument("--lambda1", default=60, type=float)
-parser.add_argument("--lambda2", default=10, type=float)
+parser.add_argument("--epoch_y", default=50, type=int)
+parser.add_argument("--epoch_rx", default=50, type=int)
+parser.add_argument("--epoch_xy", default=50, type=int)
+parser.add_argument("--save_epoch", default=10, type=int)
+
+# parser.add_argument("--alpha1", default=2, type=float)
+# parser.add_argument("--alpha2", default=10, type=float)
+# parser.add_argument("--lambda1", default=60, type=float)
+# parser.add_argument("--lambda2", default=10, type=float)
+parser.add_argument("--kl_weight", default=10, type=float)
+parser.add_argument("--rec_weight", default=10, type=float)
+parser.add_argument("--gen_weight", default=1, type=float)
+parser.add_argument("--disc_weight", default=1, type=float)
 args = parser.parse_args()
 
 
@@ -38,11 +50,14 @@ def train_y(device, transforms):
     dict_path = os.path.join(args.save_dir, "y_training.pth")
     load_dict = torch.load(dict_path) if os.path.exists(dict_path) else None
 
-    Ey = model.Encoder(args.z_dim)
-    Gy = model.Generator(args.z_dim)
+    # Ey = model.Encoder(args.z_dim)
+    # Gy = model.Generator(args.z_dim)
+    Ey = model.Encoder()
+    Gy = model.Generator()
     Dy = model.DiscriminatorImage()
 
     if load_dict:
+        print("load the trained model")
         Ey.load_state_dict(load_dict['ey'])
         Gy.load_state_dict(load_dict['gy'])
         Dy.load_state_dict(load_dict['dy'])
@@ -51,35 +66,61 @@ def train_y(device, transforms):
     Gy.to(device)
     Dy.to(device)
 
-    optimizer_ey = torch.optim.Adam(Ey.parameters(), lr=args.lr_encoder)
-    optimizer_gy = torch.optim.Adam(Gy.parameters(), lr=args.lr_generator)
-    optimizer_dy = torch.optim.Adam(Dy.parameters(), lr=args.lr_discimg)
+    optimizer_vae = torch.optim.Adam(
+        itertools.chain(
+            filter(lambda p: p.requires_grad, Ey.parameters()),
+            filter(lambda p: p.requires_grad, Gy.parameters())
+        ),
+        lr=args.lr,
+        betas=(0.0, 0.999)
+    )
+    optimizer_d = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, Dy.parameters()),
+        lr=args.lr,
+        betas=(0.0, 0.999)
+    )
+    # optimizer_ey = torch.optim.Adam(Ey.parameters(), lr=args.lr_encoder)
+    # optimizer_gy = torch.optim.Adam(Gy.parameters(), lr=args.lr_generator)
+    # optimizer_dy = torch.optim.Adam(Dy.parameters(), lr=args.lr_discimg)
 
     for epoch in range(1, args.epoch_y+1):
         vae_loss_sum = 0.
+        vae_kl_loss = 0.
+        vae_rec_loss = 0.
+        vae_gan_lsloss = 0.
+
         disc_loss_sum = 0.
         for idx, y in enumerate(y_dataloader):
+            y = y.to(device)
             # train VAE
-            optimizer_ey.zero_grad()
-            optimizer_gy.zero_grad()
+            optimizer_vae.zero_grad()
 
-            zy = Ey(y)
+            # zy = Ey(y)
+            # y_ = Gy(zy)
+            # sy_, _ = Dy(y_)
+            zy, _ = Ey(y)
             y_ = Gy(zy)
             sy_, _ = Dy(y_)
 
-            KL_loss = loss.latent_loss(Ey.mu, Ey.logvar)
+            # KL_loss = loss.latent_loss(Ey.mu, Ey.logvar)
+            KL_loss = Ey.kl_divergence.mean()
             reconstruct_loss = loss.VAE_reconstruct_loss(y_, y)
             lsloss_gen = loss.LSLoss_gen(sy_)
-            vae_loss = KL_loss + args.alpha * reconstruct_loss + lsloss_gen
+
+            # vae_loss = args.alpha1 * KL_loss + args.alpha2 * reconstruct_loss
+            vae_loss = args.kl_weight * KL_loss + args.rec_weight * reconstruct_loss + args.gen_weight * lsloss_gen
+            # vae_loss = KL_loss + reconstruct_loss + lsloss_gen
             vae_loss.backward()
 
-            optimizer_ey.step()
-            optimizer_gy.step()
+            optimizer_vae.step()
             vae_loss_sum += vae_loss.item()
+            vae_kl_loss += KL_loss.item()
+            vae_rec_loss += reconstruct_loss.item()
+            vae_gan_lsloss += lsloss_gen.item()
 
             # train discriminator
-            optimizer_dy.zero_grad()
-            zy = Ey(y)
+            optimizer_d.zero_grad()
+            zy, _ = Ey(y)
             y_ = Gy(zy)
             sy_, _ = Dy(y_)
 
@@ -91,17 +132,35 @@ def train_y(device, transforms):
             disc_loss_sum += lsloss_disc_real.item()
 
             lsloss_disc = lsloss_disc_fake + lsloss_disc_real
+            lsloss_disc = lsloss_disc * args.disc_weight
             lsloss_disc.backward()
-            optimizer_dy.step()
+            optimizer_d.step()
 
-            print("idx %d: VAE LOSS: %f, DISC LOSS: %f " % (idx, vae_loss.item(), lsloss_disc.item()))
-        print("epoch %d: VAE LOSS: %f, DISC LOSS: %f " % (epoch, vae_loss_sum, disc_loss_sum))
+            if (idx+1) % 50 == 0:
+                # print("--idx %d: VAE LOSS: %f" % (idx+1, vae_loss.item()))
+                print(
+                    "--idx %d: VAE LOSS: %f, KL LOSS: %f, REC LOSS: %f, GEN LOSS: %f, DISC LOSS: %f " %
+                    (idx+1, vae_loss.item(), KL_loss.item(), reconstruct_loss.item(), lsloss_gen.item(), lsloss_disc.item())
+                    )
+                # print("--idx %d: VAE LOSS: %f, DISC LOSS: %f " % (idx+1, vae_loss.item(), lsloss_disc.item()))
+        print(
+            "epoch %d: VAE LOSS: %f, KL LOSS: %f, REC LOSS: %f, GEN LOSS: %f, DISC LOSS: %f " %
+            (epoch, vae_loss_sum, vae_kl_loss, vae_rec_loss, vae_gan_lsloss, disc_loss_sum)
+            )
+        if epoch % args.save_epoch == 0:
+            save_dict = {
+                'ey': Ey.state_dict(),
+                'gy': Gy.state_dict(),
+                'dy': Dy.state_dict(),
+                }
+            torch.save(save_dict, os.path.join(args.save_dir, "y_training.pth"))
+            print("This checkpoint for y training has been saved.")
 
     print("Training process for y has finished.")
     save_dict = {
-        'ey': Ey.state_dict(),  # 'ey_optimizer': optimizer_ey.state_dict(),
-        'gy': Gy.state_dict(),  # 'gy_optimizer': optimizer_gy.state_dict(),
-        'dy': Dy.state_dict(),  # 'dy_optimizer': optimizer_dy.state_dict(),
+        'ey': Ey.state_dict(),
+        'gy': Gy.state_dict(),
+        'dy': Dy.state_dict(),
         }
     torch.save(save_dict, os.path.join(args.save_dir, "y_training.pth"))
     print("This checkpoint for y training has been saved.")
@@ -335,17 +394,17 @@ def train():
 
     transforms = torchvision.transforms.Compose([
         torchvision.transforms.ToPILImage(),
-        torchvision.transforms.Resize(256),
+        torchvision.transforms.Resize((256, 256)),
         torchvision.transforms.ToTensor(),
         # torchvision.transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
 
     print("Training for y begin!")
     train_y(device, transforms)
-    print("Training for r&x begin!")
-    train_rx(device, transforms)
-    print("Training for x&y begin!")
-    train_xy(device, transforms)
+    # print("Training for r&x begin!")
+    # train_rx(device, transforms)
+    # print("Training for x&y begin!")
+    # train_xy(device, transforms)
 
 
 if __name__ == "__main__":

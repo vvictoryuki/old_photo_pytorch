@@ -1,7 +1,10 @@
 # import torch
+from PIL import Image, ImageFile
+import imageio
+import numpy as np
 import torchvision
 import os
-import cv2
+# import cv2
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -15,10 +18,12 @@ class YDS(Dataset):
     def __getitem__(self, idx):
         img_path = self.images[idx]
         img_path = os.path.join(self.root_dir, img_path)
-        img = cv2.imread(img_path)
-
+        # img = cv2.imread(img_path)
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        img_pil = Image.open(img_path).convert('RGB')
         if self.transform:
-            img = self.transform(img)
+            img = self.transform(img_pil)
+        img_pil.close()
 
         return img
 
@@ -40,12 +45,17 @@ class RXDS(Dataset):
         x_img_path = self.x_images[idx]
         r_img_path = os.path.join(self.r_root_dir, r_img_path)
         x_img_path = os.path.join(self.x_root_dir, x_img_path)
-        r_img = cv2.imread(r_img_path)
-        x_img = cv2.imread(x_img_path)
+        # r_img = cv2.imread(r_img_path)
+        # x_img = cv2.imread(x_img_path)
 
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        r_img_pil = Image.open(r_img_path).convert('RGB')
+        x_img_pil = Image.open(x_img_path).convert('RGB')
         if self.transform:
-            r_img = self.transform(r_img)
-            x_img = self.transform(x_img)
+            x_img = self.transform(x_img_pil)
+            r_img = self.transform(r_img_pil)
+        x_img_pil.close()
+        r_img_pil.close()
 
         return (r_img, x_img)
 
@@ -68,12 +78,17 @@ class XYDS(Dataset):
         x_img_path = "%s_in.png" % y_img_path.strip().split('_')[0]
         y_img_path = os.path.join(self.y_root_dir, y_img_path)
         x_img_path = os.path.join(self.x_root_dir, x_img_path)
-        y_img = cv2.imread(y_img_path)
-        x_img = cv2.imread(x_img_path)
+        # y_img = cv2.imread(y_img_path)
+        # x_img = cv2.imread(x_img_path)
 
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        y_img_pil = Image.open(y_img_path).convert('RGB')
+        x_img_pil = Image.open(x_img_path).convert('RGB')
         if self.transform:
-            y_img = self.transform(y_img)
-            x_img = self.transform(x_img)
+            x_img = self.transform(x_img_pil)
+            y_img = self.transform(y_img_pil)
+        x_img_pil.close()
+        y_img_pil.close()
 
         return (x_img, y_img)
 
@@ -82,19 +97,36 @@ class XYDS(Dataset):
         return len(self.y_images)
 
 
+def save_img(tensor_data, save_path):
+    numpy_img = tensor_data.cpu().float().numpy()
+    numpy_img = (np.transpose(numpy_img, (1, 2, 0)) + 1) / 2.0 * 255.0
+    # numpy_img = np.transpose(numpy_img, (1, 2, 0)) * 255.0
+    numpy_img = numpy_img.astype(np.uint8)
+    imageio.imwrite(save_path, numpy_img)
+
+
 if __name__ == "__main__":
     transforms = torchvision.transforms.Compose([
-        torchvision.transforms.ToPILImage(),
+        # torchvision.transforms.ToPILImage(),
         torchvision.transforms.Resize(256),
         torchvision.transforms.ToTensor(),
         # torchvision.transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
 
-    # yds = YDS("./data/yimg", transform=transforms)
-    # data_loader = DataLoader(yds, batch_size=128, shuffle=True)
+    yds = YDS("./data/yimg", transform=transforms)
+    data_loader = DataLoader(yds, batch_size=128, shuffle=True)
+    for i, y_data in enumerate(data_loader):
+        y_data = y_data*2-1
+        for i in range(y_data.size(0)):
+            img_name = "out_"+str(i)+".png"
+            save_img(y_data[i].data, os.path.join("./data/out", img_name))
+
     # rxds = RXDS('./data/rimg', './data/ximg', transform=transforms)
     # data_loader = DataLoader(rxds, batch_size=128, shuffle=True)
-    xyds = XYDS('./data/ximg', './data/yimg', transforms)
-    data_loader = DataLoader(xyds, batch_size=2, shuffle=True)
-    for i, (x_data, y_data) in enumerate(data_loader):
-        print(i, x_data.size(), y_data.size())
+    # for i, (r_data, x_data) in enumerate(data_loader):
+    #     print(i, r_data.size(), x_data.size())
+
+    # xyds = XYDS('./data/ximg', './data/yimg', transforms)
+    # data_loader = DataLoader(xyds, batch_size=2, shuffle=True)
+    # for i, (x_data, y_data) in enumerate(data_loader):
+    #     print(i, x_data.size(), y_data.size())
